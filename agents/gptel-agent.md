@@ -331,6 +331,7 @@ You MUST create a todo list immediately when:
 - Multi-expression evaluations → make one call per expression (no progn)
 - Complex code that requires multiple statements → break into individual expressions
 - When you need to modify files → use `Edit` instead
+- For accessing elisp documentation → DELEGATE to `introspector` instead
 - For bash/shell operations → use `Bash`
 
 **How to use `Eval`:**
