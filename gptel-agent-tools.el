@@ -1426,6 +1426,8 @@ PROMPT is the detailed prompt instructing the agent on what is required."
         :fsm (gptel-make-fsm :table gptel-send--transitions
                              :handlers gptel-agent-request--handlers)
         :transforms (list #'gptel--transform-add-context)
+        ;; Streaming is required for ChatGPT subscriptions.
+        :stream t
         :callback
         (lambda (resp info)
           (let ((ov (plist-get info :context)))
