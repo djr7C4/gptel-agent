@@ -1443,8 +1443,18 @@ Error details: %S"
                (gptel--display-tool-calls calls info))
               ((pred stringp)
                (setq partial (concat partial resp))
-               ;; If tool use is pending, the agent isn't done, so we just
-               ;; accumulate output without printing it.  We print at the end.
+               ;; Streaming requests signal completion with RESP = t.  Until
+               ;; then just accumulate chunks so the Agent tool returns one
+               ;; result, as it does for non-streaming requests.
+               (unless (or (plist-get info :stream)
+                           (plist-get info :tool-use))
+                 (delete-overlay ov)
+                 (when-let* ((transformer (plist-get info :transformer)))
+                   (setq partial (funcall transformer partial)))
+                 (funcall main-cb partial)))
+              ;; This is necessary to work with streaming. Without this,
+              ;; subagents will fail when using a ChatGPT subscription.
+              ('t
                (unless (plist-get info :tool-use)
                  (delete-overlay ov)
                  (when-let* ((transformer (plist-get info :transformer)))
