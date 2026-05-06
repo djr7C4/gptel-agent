@@ -396,8 +396,7 @@ COUNT is the number of results to return (default 5)."
      (condition-case errdata
          (let ((dom (libxml-parse-html-region (point) (point-max))))
            (with-temp-buffer
-             (eww-score-readability dom)
-             (shr-insert-document (eww-highest-readability dom))
+             (shr-insert-document dom)
              (decode-coding-region (point-min) (point-max) 'utf-8)
              (funcall
               cb (buffer-substring-no-properties
