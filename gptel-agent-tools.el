@@ -387,6 +387,9 @@ COUNT is the number of results to return (default 5)."
     (funcall cb (apply #'concat (nreverse results)))))
 
 ;;;; Read URLs
+(defvar gptel-agent--read-url-size-limit 30000)
+(defvar gptel-agent--webfetch-cache-directory (make-temp-file "gptel-agent-webfetch-cache" t))
+
 (defun gptel-agent--read-url (tool-cb url)
   "Fetch URL text and call TOOL-CB with it."
   (gptel-agent--fetch-with-timeout
@@ -398,6 +401,16 @@ COUNT is the number of results to return (default 5)."
            (with-temp-buffer
              (shr-insert-document dom)
              (decode-coding-region (point-min) (point-max) 'utf-8)
+             (when (> (buffer-size) gptel-agent--read-url-size-limit)
+               (let* ((temporary-file-directory gptel-agent--webfetch-cache-directory)
+                      (file (make-temp-file "webfetch")))
+                 ;; Use `write-region' instead of `write-file' to avoid
+                 ;; associating the buffer with a file.
+                 (write-region (point-min) (point-max) file)
+                 (erase-buffer)
+                 (insert "Note: the webpage was too large to fetch the full text. Inspect the full version " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
+                 (eww-score-readability dom)
+                 (shr-insert-document (eww-highest-readability dom))))
              (funcall
               cb (buffer-substring-no-properties
                   (point-min) (point-max)))))
