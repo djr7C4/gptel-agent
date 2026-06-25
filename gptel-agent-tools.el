@@ -1120,8 +1120,8 @@ file.  Results are sorted by modification time."
   (let* ((full-path (expand-file-name (substitute-in-file-name path)))
          (git-root (and (executable-find "git") (locate-dominating-file full-path ".git")))
          (grepper (cond
-                   (git-root "git")
                    ((executable-find "rg") "rg")
+                   (git-root "git")
                    ((executable-find "grep") "grep")
                    (t (error "Error: ripgrep/grep/git-grep not available, \
 this tool cannot be used")))))
