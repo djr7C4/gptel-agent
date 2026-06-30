@@ -408,7 +408,7 @@ COUNT is the number of results to return (default 5)."
                  ;; associating the buffer with a file.
                  (write-region (point-min) (point-max) file)
                  (erase-buffer)
-                 (insert "Note: the webpage was too large to fetch the full text. Inspect the full version " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
+                 (insert "Note: the webpage was too large to fetch the full text. An abbreviated version has been provided below. Inspect the full version at " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
                  (eww-score-readability dom)
                  (shr-insert-document (eww-highest-readability dom))))
              (funcall
