@@ -387,7 +387,7 @@ COUNT is the number of results to return (default 5)."
     (funcall cb (apply #'concat (nreverse results)))))
 
 ;;;; Read URLs
-(defvar gptel-agent--read-url-size-limit 30000)
+(defvar gptel-agent--read-url-max-inline-size 30000)
 (defvar gptel-agent--webfetch-cache-directory (make-temp-file "gptel-agent-webfetch-cache" t))
 
 (defun gptel-agent--read-url (tool-cb url)
@@ -401,7 +401,7 @@ COUNT is the number of results to return (default 5)."
            (with-temp-buffer
              (shr-insert-document dom)
              (decode-coding-region (point-min) (point-max) 'utf-8)
-             (when (> (buffer-size) gptel-agent--read-url-size-limit)
+             (when (> (buffer-size) gptel-agent--read-url-max-inline-size)
                (let* ((temporary-file-directory gptel-agent--webfetch-cache-directory)
                       (file (make-temp-file "webfetch")))
                  ;; Use `write-region' instead of `write-file' to avoid
