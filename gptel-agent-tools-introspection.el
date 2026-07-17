@@ -60,7 +60,8 @@
     (let* (buf
            (remember (lambda (buffer alist)
                        (display-buffer-no-window (setq buf buffer) alist)))
-           (display-buffer-overriding-action `(,remember (allow-no-window . t))))
+           (display-buffer-overriding-action
+            `(,remember (allow-no-window . t))))
       (info-lookup-symbol symbol #'emacs-lisp-mode)
       (with-current-buffer buf
         (buffer-substring-no-properties (point-min) (point-max))))))
