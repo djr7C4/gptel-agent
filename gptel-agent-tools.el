@@ -959,8 +959,11 @@ error if writing fails.
 PATH, FILENAME, and CONTENT must all be strings."
   (unless (and (stringp path) (stringp filename) (stringp content))
     (error "PATH, FILENAME or CONTENT is not a string, cancelling action"))
-  (when-let* ((remote (file-remote-p default-directory)))
-    (setq path (concat remote path)))
+  ;; FIXME multiple possibilities when default-directory is remote:
+  ;; - absolute path with /ssh:... prefix
+  ;; - relative path with ./ prefix
+  ;; (when-let* ((remote (file-remote-p default-directory)))
+  ;;   (setq path (concat remote path)))
   (let ((full-path (expand-file-name filename path)))
     (condition-case errdata
         (with-temp-buffer
@@ -1061,11 +1064,12 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
         (with-temp-buffer
           (insert-file-contents filename)
           (buffer-string)))
-    ;; TODO: Handle nil start-line OR nil end-line
+    ;; Default nil start-line to 1, nil end-line to end of file
+    (unless start-line (setq start-line 1))
     (cl-decf start-line)
     (let* ((file-size (nth 7 (file-attributes filename)))
            (chunk-size (min file-size (* gptel-agent-read-file-size-threshold 1024)))
-           (byte-offset 0) (line-offset (- end-line start-line)))
+           (byte-offset 0) line-offset)
       (with-temp-buffer
         ;; Go to start-line
         (while (and (> start-line 0)
@@ -1081,6 +1085,9 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
             (delete-region (point-min) (line-beginning-position))))
 
         (delete-region (point-min) (point))
+
+        (unless end-line (setq end-line (line-number-at-pos (point-max))))
+        (setq line-offset (- end-line start-line))
 
         ;; Go to end-line, forward by line-offset
         (cl-block nil
