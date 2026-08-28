@@ -25,18 +25,18 @@
 ;; - "Bash"           : Execute a Bash command.
 ;;
 ;; Web:
-;; - "WebSearch"             : Search the web for the first five results to a query.
-;; - "Read"               : Fetch and read the contents of a URL.
-;; - "YouTube"       : Find the description and video transcript for a youtube video.
+;; - "WebSearch" : Search the web for the first five results to a query.
+;; - "WebFetch"  : Fetch and read the contents of a URL, and for
+;;                 YouTube URLs get the video description and transcript.
 ;;
 ;; Filesystem:
 ;; - "Mkdir"  : Create a new directory.
-;; - "Glob"      : Find files matching a glob pattern
-;; - "Grep"      : Grep for text in file(s).
-;; - "Read" : Read a specific line range from a file.
-;; - "Insert"  : Insert text at a specific line number in a file.
-;; - "Edit"      : Replace text in file(s) using string match or unified diff.
-;; - "Write"      : Create a new file with content.
+;; - "Glob"   : Find files matching a glob pattern
+;; - "Grep"   : Grep for text in file(s).
+;; - "Read"   : Read a specific line range from a file.
+;; - "Insert" : Insert text at a specific line number in a file.
+;; - "Edit"   : Replace text in file(s) using string match or unified diff.
+;; - "Write"  : Create a new file with content.
 
 ;;; Code:
 
@@ -393,34 +393,50 @@ COUNT is the number of results to return (default 5)."
 (defvar gptel-agent--webfetch-cache-directory (make-temp-file "gptel-agent-webfetch-cache" t))
 
 (defun gptel-agent--read-url (tool-cb url)
-  "Fetch URL text and call TOOL-CB with it."
-  (gptel-agent--fetch-with-timeout
-   url
-   (lambda (cb)
-     (goto-char (point-min)) (forward-paragraph)
-     (condition-case errdata
-         (let ((dom (libxml-parse-html-region (point) (point-max))))
-           (with-temp-buffer
-             (shr-insert-document dom)
-             (decode-coding-region (point-min) (point-max) 'utf-8)
-             (when (> (buffer-size) gptel-agent--read-url-max-inline-size)
-               (let* ((temporary-file-directory gptel-agent--webfetch-cache-directory)
-                      (file (make-temp-file "webfetch")))
-                 ;; Use `write-region' instead of `write-file' to avoid
-                 ;; associating the buffer with a file.
-                 (write-region (point-min) (point-max) file)
-                 (erase-buffer)
-                 (insert "Note: the webpage was too large to fetch the full text. An abbreviated version has been provided below. Inspect the full version at " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
-                 (eww-score-readability dom)
-                 (shr-insert-document (eww-highest-readability dom))))
-             (funcall
-              cb (buffer-substring-no-properties
-                  (point-min) (point-max)))))
-       (error (funcall cb (format "Error: Request failed with error data:\n%S"
-                                  errdata)))))
-   tool-cb (format "Fetch for \"%s\"" url)))
+  "Fetch URL text and call TOOL-CB with it.
+
+If URL is a YouTube video, fetch the video description and transcript
+instead."
+  (if-let ((video-id (gptel-agent--yt-video-id url)))
+      (gptel-agent--yt-fetch-watch-page tool-cb video-id)
+    (gptel-agent--fetch-with-timeout
+     url
+     (lambda (cb)
+       (goto-char (point-min)) (forward-paragraph)
+       (condition-case errdata
+           (let ((dom (libxml-parse-html-region (point) (point-max))))
+             (with-temp-buffer
+               (shr-insert-document dom)
+               (decode-coding-region (point-min) (point-max) 'utf-8)
+               (when (> (buffer-size) gptel-agent--read-url-max-inline-size)
+                 (let* ((temporary-file-directory gptel-agent--webfetch-cache-directory)
+                        (file (make-temp-file "webfetch")))
+                   ;; Use `write-region' instead of `write-file' to avoid
+                   ;; associating the buffer with a file.
+                   (write-region (point-min) (point-max) file)
+                   (erase-buffer)
+                   (insert "Note: the webpage was too large to fetch the full text. An abbreviated version has been provided below. Inspect the full version at " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
+                   (eww-score-readability dom)
+                   (shr-insert-document (eww-highest-readability dom))
+                   (decode-coding-region (point-min) (point-max) 'utf-8)))
+               (funcall
+                cb (buffer-substring-no-properties
+                    (point-min) (point-max)))))
+         (error (funcall cb (format "Error: Request failed with error data:\n%S"
+                                    errdata)))))
+     tool-cb (format "Fetch for \"%s\"" url))))
 
 ;;;; Fetch youtube transcript
+(defun gptel-agent--yt-video-id (url)
+  "Return the video ID if URL is a YouTube video URL, nil otherwise."
+  (and (string-match
+        (rx bol (opt "http" (opt "s") "://")
+            (opt "www.") "youtu" (or ".be" "be.com") "/"
+            (opt "watch?v=")
+            (group (one-or-more (not (any "?&")))))
+        url)
+       (match-string 1 url)))
+
 (defun gptel-agent--yt-parse-captions (xml-string)
   "Parse YouTube caption XML-STRING and return DOM."
   (with-temp-buffer
@@ -575,21 +591,6 @@ Call CALLBACK with formatted result containing DESCRIPTION and transcript."
                                   (or description "No description available.")
                                   (or formatted-transcript "Error parsing transcript."))))))
            (list callback description)))))))
-
-(defun gptel-agent--yt-read-url (callback url)
-  "Fetch YouTube metadata and transcript for URL, calling CALLBACK with result.
-CALLBACK is called with a markdown-formatted string containing the video
-description and transcript formatted as timestamped paragraphs."
-  (if-let* ((video-id
-             (and (string-match
-                   (rx bol (opt "http" (opt "s") "://")
-                       (opt "www.") "youtu" (or ".be" "be.com") "/"
-                       (opt "watch?v=")
-                       (group (one-or-more (not (any "?&")))))
-                   url)
-                  (match-string 1 url))))
-      (gptel-agent--yt-fetch-watch-page callback video-id)
-    (funcall callback "Error: Invalid YouTube URL")))
 
 ;;; Code tools
 ;;;; Diagnostics from flymake
@@ -1607,6 +1608,9 @@ If required, consider using the url as the input to the `Read` tool to get the c
  :description "Fetch and read the contents of a URL.
 
 - Returns the text of the URL (not HTML) formatted for reading.
+- For YouTube video URLs, returns the video description and transcript
+  (timestamped paragraphs) instead.  Use this tool proactively for
+  YouTube URLs.
 - Request times out after 30 seconds."
  :args '(( :name "url"
            :type "string"
@@ -1614,20 +1618,6 @@ If required, consider using the url as the input to the `Read` tool to get the c
  :async t
  :include t
  :category "gptel-agent")
-
-(gptel-make-tool
- :name "YouTube"
- :function #'gptel-agent--yt-read-url
- :description "Find the description and video transcript for a youtube video.  Returns a markdown formatted string containing two sections:
-
-\"description\": The video description added by the uploader
-\"transcript\": The video transcript in SRT format"
- :args '((:name "url"
-                :description "The youtube video URL, for example \"https://www.youtube.com/watch?v=H2qJRnV8ZGA\""
-                :type "string"))
- :category "gptel-agent"
- :async t
- :include t)
 
 (gptel-make-tool
  :name "Diagnostics"
