@@ -25,18 +25,18 @@
 ;; - "Bash"           : Execute a Bash command.
 ;;
 ;; Web:
-;; - "WebSearch"             : Search the web for the first five results to a query.
-;; - "Read"               : Fetch and read the contents of a URL.
-;; - "YouTube"       : Find the description and video transcript for a youtube video.
+;; - "WebSearch" : Search the web for the first five results to a query.
+;; - "WebFetch"  : Fetch and read the contents of a URL, and for
+;;                 YouTube URLs get the video description and transcript.
 ;;
 ;; Filesystem:
 ;; - "Mkdir"  : Create a new directory.
-;; - "Glob"      : Find files matching a glob pattern
-;; - "Grep"      : Grep for text in file(s).
-;; - "Read" : Read a specific line range from a file.
-;; - "Insert"  : Insert text at a specific line number in a file.
-;; - "Edit"      : Replace text in file(s) using string match or unified diff.
-;; - "Write"      : Create a new file with content.
+;; - "Glob"   : Find files matching a glob pattern
+;; - "Grep"   : Grep for text in file(s).
+;; - "Read"   : Read a specific line range from a file.
+;; - "Insert" : Insert text at a specific line number in a file.
+;; - "Edit"   : Replace text in file(s) using string match or unified diff.
+;; - "Write"  : Create a new file with content.
 
 ;;; Code:
 
@@ -45,6 +45,7 @@
 (require 'gptel)
 (require 'eww)
 (require 'url-http)
+(require 'mail-utils)
 (eval-when-compile (require 'cl-lib))
 
 (declare-function org-escape-code-in-region "org-src")
@@ -181,6 +182,30 @@ properties persist through refontification."
             (setq pos (or next (1- (point-max))))))))))
 
 ;;; System tools
+(defun gptel-agent--sanitize-buffer (&optional tool-name)
+  "Prepare current buffer for tool-result serialization, in place.
+
+If the buffer contains a NUL byte (binary content), keep only the text
+head before it, followed by a banner with size and inspection hints.
+Return non-nil if binary content was found.
+
+TOOL-NAME is used to prefix the inserted notices."
+  (save-excursion
+    (goto-char (point-min))
+    (skip-chars-forward "^\0")          ; C-level scan; also the truncate point
+    (if (eobp)                          ; no NUL
+        (prog1 nil
+          (when (memq 'eight-bit (find-charset-region (point-min) (point-max)))
+            (goto-char (point-min))
+            (insert (format "[%s: warning, undecodable bytes present]\n"
+                            (or tool-name "gptel-agent")))))
+      (let ((size (position-bytes (point-max))))
+        (delete-region (min (point) (+ (point-min) 2000)) (point-max))
+        (insert (format "\n[%s: Binary output: %d bytes.  \
+Inspect with file(1), strings(1), xxd(1), base64(1)]"
+                        (or tool-name "gptel-agent") size))
+        t))))
+
 ;; "Execute Bash commands to inspect files and system state.
 
 ;; This tool provides access to a Bash shell with GNU coreutils (or equivalents)
@@ -263,11 +288,13 @@ COMMAND is the bash command string to execute."
                 :buffer output-buffer
                 :command (list "bash" "-c" command)
                 :connection-type 'pipe
+                :file-handler t
                 :sentinel
                 (lambda (process _event)
                   (when (memq (process-status process) '(exit signal))
                     (let* ((exit-code (process-exit-status process))
                            (output (with-current-buffer (process-buffer process)
+                                     (gptel-agent--sanitize-buffer "Bash")
                                      (buffer-string))))
                       (kill-buffer (process-buffer process))
                       (funcall callback
@@ -287,6 +314,7 @@ passed to URL-CB.  FAILED-MSG is a fragment used for messaging.  Handles
 cleanup."
   (let* ((timeout 30) timer done
          (inherit-process-coding-system t)
+         (url-request-noninteractive t)
          (proc-buffer
           (url-retrieve
            url (lambda (status)
@@ -349,41 +377,41 @@ COUNT is the number of results to return (default 5)."
            tool-cb (format "Web search for \"%s\"" query))
           gptel-agent--web-search-active)))
 
-(defun gptel-agent--web-fix-unreadable ()
-  "Replace invalid characters from point to end in current buffer."
-  (while (and (skip-chars-forward "\0-\x3fff7f")
-              (not (eobp)))
-    (display-warning
-     '(gptel gptel-agent-tools)
-     (format "Invalid character in buffer \"%s\"" (buffer-name)))
-    (delete-char 1) (insert "?")))
-
 (defun gptel-agent--web-search-eww-callback (cb)
   "Extract website text and run callback CB with it."
-  (let* ((count 5) (results))
-    (goto-char (point-min))
-    (goto-char url-http-end-of-headers)
-    ;; (gptel-agent--web-fix-unreadable)
-    (let* ((dom (libxml-parse-html-region (point) (point-max)))
-           (result-count 0))
-      (eww-score-readability dom)
-      ;; (erase-buffer) (buffer-disable-undo)
-      (with-temp-buffer
-        (shr-insert-document (eww-highest-readability dom))
-        (goto-char (point-min))
-        (while (and (not (eobp)) (< result-count count))
-          (let ((pos (point))
-                (url (get-char-property (point) 'shr-url))
-                (next-pos (gptel-agent--shr-next-link)))
-            (when-let* (((stringp url))
-                        (idx (string-search "http" url))
-                        (url-fmt (url-unhex-string (substring url idx))))
-              (cl-incf result-count)
-              (push (concat url-fmt "\n\n"
-                            (string-trim
-                             (buffer-substring-no-properties pos next-pos))
-                            "\n\n----\n")
-                    results))))))
+  (let ((count 5) (results)
+        (body-start (if url-http-end-of-headers
+                        (save-excursion
+                          (goto-char url-http-end-of-headers)
+                          (point))
+                      (goto-char (point-min)) (forward-paragraph)
+                      (point))))
+    ;; Bare NUL scan: the body is parsed as HTML below when not binary.
+    (if (save-excursion (goto-char body-start)
+                        (skip-chars-forward "^\0")
+                        (not (eobp)))
+        (setq results
+              (list "[WebSearch: binary content in search results page.]"))
+      ;; NOTE: libxml2 replaces unencodable chars with placeholders
+      (let ((dom (libxml-parse-html-region body-start (point-max)))
+            (result-count 0))
+        (eww-score-readability dom)
+        (with-temp-buffer
+          (shr-insert-document (eww-highest-readability dom))
+          (goto-char (point-min))
+          (while (and (not (eobp)) (< result-count count))
+            (let ((pos (point))
+                  (url (get-char-property (point) 'shr-url))
+                  (next-pos (gptel-agent--shr-next-link)))
+              (when-let* (((stringp url))
+                          (idx (string-search "http" url))
+                          (url-fmt (url-unhex-string (substring url idx))))
+                (cl-incf result-count)
+                (push (concat url-fmt "\n\n"
+                              (string-trim
+                               (buffer-substring-no-properties pos next-pos))
+                              "\n\n----\n")
+                      results)))))))
     (funcall cb (apply #'concat (nreverse results)))))
 
 ;;;; Read URLs
@@ -391,34 +419,70 @@ COUNT is the number of results to return (default 5)."
 (defvar gptel-agent--webfetch-cache-directory (make-temp-file "gptel-agent-webfetch-cache" t))
 
 (defun gptel-agent--read-url (tool-cb url)
-  "Fetch URL text and call TOOL-CB with it."
-  (gptel-agent--fetch-with-timeout
-   url
-   (lambda (cb)
-     (goto-char (point-min)) (forward-paragraph)
-     (condition-case errdata
-         (let ((dom (libxml-parse-html-region (point) (point-max))))
-           (with-temp-buffer
-             (shr-insert-document dom)
-             (decode-coding-region (point-min) (point-max) 'utf-8)
-             (when (> (buffer-size) gptel-agent--read-url-max-inline-size)
-               (let* ((temporary-file-directory gptel-agent--webfetch-cache-directory)
-                      (file (make-temp-file "webfetch")))
-                 ;; Use `write-region' instead of `write-file' to avoid
-                 ;; associating the buffer with a file.
-                 (write-region (point-min) (point-max) file)
-                 (erase-buffer)
-                 (insert "Note: the webpage was too large to fetch the full text. An abbreviated version has been provided below. Inspect the full version at " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
-                 (eww-score-readability dom)
-                 (shr-insert-document (eww-highest-readability dom))))
-             (funcall
-              cb (buffer-substring-no-properties
-                  (point-min) (point-max)))))
-       (error (funcall cb (format "Error: Request failed with error data:\n%S"
-                                  errdata)))))
-   tool-cb (format "Fetch for \"%s\"" url)))
+  "Fetch URL text and call TOOL-CB with it.
+
+If URL is a YouTube video, fetch the video description and transcript
+instead."
+  (if-let ((video-id (gptel-agent--yt-video-id url)))
+      (gptel-agent--yt-fetch-watch-page tool-cb video-id)
+    (gptel-agent--fetch-with-timeout
+     url
+     (lambda (cb)
+       (condition-case errdata
+           (let ((body-start (if url-http-end-of-headers
+                                 (save-excursion
+                                   (goto-char url-http-end-of-headers)
+                                   (point))
+                               (goto-char (point-min)) (forward-paragraph)
+                               (point)))
+                 (ctype (and url-http-end-of-headers
+                             (save-excursion
+                               (goto-char (point-min))
+                               (mail-fetch-field "content-type")))))
+             ;; Bare NUL scan: the body is parsed as HTML below when not binary.
+             (if (save-excursion (goto-char body-start)
+                                 (skip-chars-forward "^\0")
+                                 (not (eobp)))
+                 (funcall
+                  cb (concat "[WebFetch: binary content"
+                             (and ctype ;Header values are untrusted bytes and bypass libxml2
+                                  (format " (%s)" (replace-regexp-in-string
+                                                   "[^[:ascii:]]" "?" ctype)))
+                             " at URL.  Use the Bash tool with curl(1) or \
+wget(1) to download it, then inspect it with file(1), strings(1), \
+pdftotext(1) or base64(1)]"))
+               ;; NOTE: libxml2 replaces unencodable chars with placeholders
+               (let ((dom (libxml-parse-html-region body-start (point-max))))
+                 (with-temp-buffer
+                   (shr-insert-document dom)
+                   (decode-coding-region (point-min) (point-max) 'utf-8)
+                   (when (> (buffer-size) gptel-agent--read-url-max-inline-size)
+                     (let* ((temporary-file-directory gptel-agent--webfetch-cache-directory)
+                            (file (make-temp-file "webfetch")))
+                       ;; Use `write-region' instead of `write-file' to avoid
+                       ;; associating the buffer with a file.
+                       (write-region (point-min) (point-max) file)
+                       (erase-buffer)
+                       (insert "Note: the webpage was too large to fetch the full text. An abbreviated version has been provided below. Inspect the full version at " file " if information is missing. Use the Grep and Glob tools first and Read selectively if required.\n\n")
+                       (eww-score-readability dom)
+                       (shr-insert-document (eww-highest-readability dom))))
+                   (funcall cb (buffer-substring-no-properties
+                                (point-min) (point-max)))))))
+         (error (funcall cb (format "Error: Request failed with error data:\n%S"
+                                    errdata)))))
+     tool-cb (format "Fetch for \"%s\"" url))))
 
 ;;;; Fetch youtube transcript
+(defun gptel-agent--yt-video-id (url)
+  "Return the video ID if URL is a YouTube video URL, nil otherwise."
+  (and (string-match
+        (rx bol (opt "http" (opt "s") "://")
+            (opt "www.") "youtu" (or ".be" "be.com") "/"
+            (opt "watch?v=")
+            (group (one-or-more (not (any "?&")))))
+        url)
+       (match-string 1 url)))
+
 (defun gptel-agent--yt-parse-captions (xml-string)
   "Parse YouTube caption XML-STRING and return DOM."
   (with-temp-buffer
@@ -573,21 +637,6 @@ Call CALLBACK with formatted result containing DESCRIPTION and transcript."
                                   (or description "No description available.")
                                   (or formatted-transcript "Error parsing transcript."))))))
            (list callback description)))))))
-
-(defun gptel-agent--yt-read-url (callback url)
-  "Fetch YouTube metadata and transcript for URL, calling CALLBACK with result.
-CALLBACK is called with a markdown-formatted string containing the video
-description and transcript formatted as timestamped paragraphs."
-  (if-let* ((video-id
-             (and (string-match
-                   (rx bol (opt "http" (opt "s") "://")
-                       (opt "www.") "youtu" (or ".be" "be.com") "/"
-                       (opt "watch?v=")
-                       (group (one-or-more (not (any "?&")))))
-                   url)
-                  (match-string 1 url))))
-      (gptel-agent--yt-fetch-watch-page callback video-id)
-    (funcall callback "Error: Invalid YouTube URL")))
 
 ;;; Code tools
 ;;;; Diagnostics from flymake
@@ -784,65 +833,66 @@ Consider providing more context for the replacement, or a unified diff")
             (error "Error: Could not find old_str \"%s\" in file %s"
                    (truncate-string-to-width old-str 20) path))))
     ;; Replacement by Diff
-    (unless (executable-find "patch")
-      (error "Error: Command \"patch\" not available, cannot apply diffs.\
+    (let ((default-directory (file-name-directory (expand-file-name path))))
+      (unless (executable-find "patch" t)
+        (error "Error: Command \"patch\" not available, cannot apply diffs.\
 Use string replacement instead"))
-    (let* ((out-buf-name (generate-new-buffer-name "*patch-stdout*"))
-           ;; (err-buf-name (generate-new-buffer-name "*patch-stderr*"))
-           (target-file (expand-file-name path))
-           (exit-status -1)             ; Initialize to a known non-zero value
-           (result-output "")
-           ;; (result-error "")
-           )
-      (unwind-protect
-          (let ((default-directory (file-name-directory (expand-file-name path)))
-                (patch-options    '("--forward" "--verbose")))
-
-            (with-temp-message
-                (format "Applying diff to: `%s` with options: %s"
-                        target-file patch-options)
-              (with-temp-buffer
-                (insert new-str-or-diff)
-                ;; Insert trailing newline, required by patch
-                (unless (eq (char-before (point-max)) ?\n)
-                  (goto-char (point-max))
-                  (insert "\n"))
-                (goto-char (point-min))
-                ;; Remove code fences, if present
-                (when (looking-at-p "^ *```diff\n")
-                  (save-excursion
-                    (delete-line)
+      (let* ((out-buf-name (generate-new-buffer-name "*patch-stdout*"))
+             ;; (err-buf-name (generate-new-buffer-name "*patch-stderr*"))
+             (target-file (expand-file-name path))
+             (diff-file (make-nearby-temp-file "gptel-agent-diff-" nil ".patch"))
+             (exit-status -1)           ; Initialize to a known non-zero value
+             ;; (result-error "")
+             (result-output ""))
+        (unwind-protect
+            (let ((patch-options '("--forward" "--verbose")))
+              (with-temp-message
+                  (format "Applying diff to: `%s` with options: %s"
+                          target-file patch-options)
+                (with-temp-buffer
+                  (insert new-str-or-diff)
+                  ;; Insert trailing newline, required by patch
+                  (unless (eq (char-before (point-max)) ?\n)
                     (goto-char (point-max))
-                    (forward-line -1)   ;guaranteed to be at a blank newline
-                    (when (looking-at-p "^ *```") (delete-line))))
-                ;; Fix line numbers in hunk headers
-                (gptel-agent--fix-patch-headers)
+                    (insert "\n"))
+                  (goto-char (point-min))
+                  ;; Remove code fences, if present
+                  (when (looking-at-p "^ *```diff\n")
+                    (save-excursion
+                      (delete-line)
+                      (goto-char (point-max))
+                      (forward-line -1) ;guaranteed to be at a blank newline
+                      (when (looking-at-p "^ *```") (delete-line))))
+                  ;; Fix line numbers in hunk headers
+                  (gptel-agent--fix-patch-headers)
+                  (write-region nil nil diff-file nil 'silent))
 
                 (setq exit-status
-                      (apply #'call-process-region (point-min) (point-max)
-                             "patch" nil (list out-buf-name t) ; stdout/stderr buffer names
-                             nil patch-options))))
+                      (apply #'process-file "patch" (file-local-name diff-file)
+                             (list out-buf-name t) ; stdout/stderr buffer name
+                             nil patch-options)))
 
-            ;; Retrieve content from buffers using their names
-            (when-let* ((stdout-buf (get-buffer out-buf-name)))
-              (when (buffer-live-p stdout-buf)
-                (with-current-buffer stdout-buf
-                  (setq result-output (buffer-string)))))
+              ;; Retrieve content from buffers using their names
+              (when-let* ((stdout-buf (get-buffer out-buf-name)))
+                (when (buffer-live-p stdout-buf)
+                  (with-current-buffer stdout-buf
+                    (setq result-output (buffer-string)))))
 
-            (if (= exit-status 0)
-                (format "Diff successfully applied to %s.
+              (if (= exit-status 0)
+                  (format "Diff successfully applied to %s.
 Patch command options: %s
 Patch STDOUT:\n%s"
-                        target-file patch-options result-output)
-              ;; Signal an Elisp error, which gptel will catch and display.
-              ;; The arguments to 'error' become the error message.
-              (error "Error: Failed to apply diff to %s (exit status %s).
+                          target-file patch-options result-output)
+                ;; Signal an Elisp error, which gptel will catch and display.
+                ;; The arguments to 'error' become the error message.
+                (error "Error: Failed to apply diff to %s (exit status %s).
 Patch command options: %s
 Patch STDOUT:\n%s"
-                     target-file exit-status patch-options
-                     result-output)))
-        (let ((stdout-buf-obj (get-buffer out-buf-name))) ;Clean up
-          (when (buffer-live-p stdout-buf-obj) (kill-buffer stdout-buf-obj)))))))
+                       target-file exit-status patch-options
+                       result-output)))
+          (let ((stdout-buf-obj (get-buffer out-buf-name))) ;Clean up
+            (when (buffer-live-p stdout-buf-obj) (kill-buffer stdout-buf-obj)))
+          (when (file-exists-p diff-file) (delete-file diff-file)))))))
 
 (defun gptel-agent--insert-in-file-preview-setup (arg-values _info)
   "Preview setup for Insert.
@@ -956,6 +1006,11 @@ error if writing fails.
 PATH, FILENAME, and CONTENT must all be strings."
   (unless (and (stringp path) (stringp filename) (stringp content))
     (error "PATH, FILENAME or CONTENT is not a string, cancelling action"))
+  ;; FIXME multiple possibilities when default-directory is remote:
+  ;; - absolute path with /ssh:... prefix
+  ;; - relative path with ./ prefix
+  ;; (when-let* ((remote (file-remote-p default-directory)))
+  ;;   (setq path (concat remote path)))
   (let ((full-path (expand-file-name filename path)))
     (condition-case errdata
         (with-temp-buffer
@@ -976,19 +1031,12 @@ MAX-LINES is the number of lines to keep, defaulting to 50."
   ;; Too large - save to temp file and return truncated info
   (when (> (buffer-size) 20000)
     (let* ((max-lines (or max-lines 50))
-           (temp-dir (expand-file-name "gptel-agent-temp"
-                                       (temporary-file-directory)))
-           (temp-file (expand-file-name
-                       (format "%s-%s-%s.txt"
-                               prefix
-                               (format-time-string "%Y%m%d-%H%M%S")
-                               (random 10000))
-                       temp-dir))
+           (temp-file (make-nearby-temp-file
+                       (format "gptel-agent-%s-%s" prefix
+                               (format-time-string "%Y%m%d-%H%M%S"))
+                       nil ".txt"))
            (orig-size (buffer-size))
            (orig-lines (line-number-at-pos (point-max))))
-      ;; Create temp directory if needed
-      (unless (file-directory-p temp-dir)
-        (make-directory temp-dir t))
       ;; Save full content
       (write-region nil nil temp-file)
       ;; Insert truncated header
@@ -1005,42 +1053,72 @@ MAX-LINES is the number of lines to keep, defaulting to 50."
                       temp-file)))))
 
 (defun gptel-agent--glob (pattern &optional path depth)
-  "Find files matching PATTERN using the `tree' command.
+  "Find files matching PATTERN using `tree' or GNU find.
 
-PATTERN is a case-insensitive regex pattern to match filenames against.
+PATTERN is a case-insensitive glob pattern applied to file
+basenames, like \"*.el\".
 PATH is the optional directory to search (defaults to current directory).
 DEPTH limits recursion depth when provided (non-negative integer).
 
-Returns a string listing matching files with full paths, sorted by
-modification time.  If the output is too large (>20000 chars), it writes
-the full results to a temporary file and returns a truncated version with
-instructions to use `Read' for the full contents.
+Uses `tree' when available, falling back to GNU find.  Hidden files
+and directories are included; .git directories are skipped.
 
-Raises an error if PATTERN is empty, PATH is not readable, or the
-`tree' executable is not found."
+Returns a string listing matching files with full paths, sorted by
+modification time, newest first.  If the output is too large (>20000
+chars), it writes the full results to a temporary file and returns a
+truncated version with instructions to use `Read' for the full
+contents.
+
+Raises an error if PATTERN is empty, PATH is not readable, or
+neither the `tree' nor the `find' executable is found."
   (when (string-empty-p pattern)
     (error "Error: pattern must not be empty"))
   (if path
       (unless (and (file-readable-p path) (file-directory-p path))
         (error "Error: path %s is not readable" path))
     (setq path "."))
-  (unless (executable-find "tree")
-    (error "Error: Executable `tree` not found.  This tool cannot be used"))
-  (let ((full-path (expand-file-name path)))
+  (let* ((use-tree (executable-find "tree" t))
+         (program (cond (use-tree "tree")
+                        ((executable-find "find" t) "find")
+                        (t (error "Error: Neither `tree` nor `find` \
+executable found.  This tool cannot be used"))))
+         (full-path (expand-file-name path)))
     (with-temp-buffer
-      (let* ((args (list "-l" "-f" "-i" "-I" ".git"
-                         "--sort=mtime" "--ignore-case"
-                         "--prune" "-P" pattern full-path))
-             (args (if (natnump depth)
-                       (nconc args (list "-L" (number-to-string depth)))
-                     args))
-             (exit-code (apply #'call-process "tree" nil t nil args)))
+      (let* ((local-path (file-local-name full-path))
+             (args
+              (if use-tree
+                  (let ((tree-args (list "-a" "-r" "-l" "-f" "-i" "-I" ".git"
+                                         "--sort=mtime" "--ignore-case"
+                                         "--prune" "-P" pattern local-path)))
+                    (if (natnump depth)
+                        (nconc tree-args
+                               (list "-L" (number-to-string depth)))
+                      tree-args))
+                (nconc
+                 (list "-L" local-path)
+                 (and (natnump depth)
+                      (list "-maxdepth" (number-to-string depth)))
+                 (list "(" "-name" ".git" ")" "-prune"
+                       "-o" "(" "-type" "f" "-iname" pattern
+                       "-printf" "%30T@\t%p\n" ")"))))
+             (exit-code (apply #'process-file program nil t nil args)))
+        (unless use-tree
+          ;; find prints "%30T@\t%p\n" per match: drop diagnostics that
+          ;; leaked into stdout, sort by mtime newest first (the padded
+          ;; timestamp makes a lexicographic sort equivalent to a
+          ;; numeric one), then strip the timestamp field.
+          (when (> (buffer-size) 0)
+            (keep-lines "^[ 0-9.]+\t" (point-min) (point-max))
+            (sort-lines t (point-min) (point-max))
+            (goto-char (point-min))
+            (while (re-search-forward "^[ 0-9.]+\t" nil t)
+              (replace-match ""))))
         (when (/= exit-code 0)
           (goto-char (point-min))
           (insert (format "Glob failed with exit code %d\n.STDOUT:\n\n"
-                          exit-code))))
-      (gptel-agent--truncate-buffer "glob")
-      (buffer-string))))
+                          exit-code)))
+        (gptel-agent--truncate-buffer "glob")
+        (buffer-string)))))
 
 ;;;; Read files or directories
 (defun gptel-agent--read-file-lines (filename start-line end-line)
@@ -1061,12 +1139,16 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
                  gptel-agent-read-file-size-threshold)
         (with-temp-buffer
           (insert-file-contents filename)
-          (buffer-string)))
-    ;; TODO: Handle nil start-line OR nil end-line
+          (if (gptel-agent--sanitize-buffer "Read")
+              (error "Error: %s appears to be a binary file; \
+inspect it via Bash with file(1), strings(1) or base64(1)" filename)
+            (buffer-string))))
+    ;; Default nil start-line to 1, nil end-line to end of file
+    (unless start-line (setq start-line 1))
     (cl-decf start-line)
     (let* ((file-size (nth 7 (file-attributes filename)))
            (chunk-size (min file-size (* gptel-agent-read-file-size-threshold 1024)))
-           (byte-offset 0) (line-offset (- end-line start-line)))
+           (byte-offset 0) (line-offset start-line))
       (with-temp-buffer
         ;; Go to start-line
         (while (and (> start-line 0)
@@ -1083,6 +1165,8 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
 
         (delete-region (point-min) (point))
 
+        (unless end-line (setq end-line most-positive-fixnum))
+        (setq line-offset (- end-line line-offset))
         ;; Go to end-line, forward by line-offset
         (cl-block nil
           (while (> line-offset 0)
@@ -1098,7 +1182,10 @@ Raises an error if PATTERN is empty, PATH is not readable, or the
                  filename nil byte-offset (+ byte-offset chunk-size))
                 (setq byte-offset (+ byte-offset chunk-size))))))
 
-        (buffer-string)))))
+        (if (gptel-agent--sanitize-buffer "Read")
+            (error "Error: %s appears to be a binary file; \
+inspect it via Bash with file(1), strings(1) or base64(1)" filename)
+          (buffer-string))))))
 
 (defun gptel-agent--grep (regex path &optional glob context-lines)
   "Search for REGEX in file or directory at PATH using ripgrep.
@@ -1118,11 +1205,15 @@ file.  Results are sorted by modification time."
   (unless (file-readable-p path)
     (error "Error: File or directory %s is not readable" path))
   (let* ((full-path (expand-file-name (substitute-in-file-name path)))
-         (git-root (and (executable-find "git") (locate-dominating-file full-path ".git")))
+         ;; Explicitly set remote to save ourselves multiple file-remote-p
+         ;; checks inside `executable-find'
+         (remote (file-remote-p default-directory))
+         (git-root (and (executable-find "git" remote)
+                        (locate-dominating-file full-path ".git")))
          (grepper (cond
                    (git-root "git")
-                   ((executable-find "rg") "rg")
-                   ((executable-find "grep") "grep")
+                   ((executable-find "rg" remote) "rg")
+                   ((executable-find "grep" remote) "grep")
                    (t (error "Error: ripgrep/grep/git-grep not available, \
 this tool cannot be used")))))
     (with-temp-buffer
@@ -1155,7 +1246,7 @@ this tool cannot be used")))))
                                 ;; "--files-with-matches"
                                 "--max-count=1000"
                                 "--heading" "--line-number" "-e" regex
-                                full-path)))
+                                (file-local-name full-path))))
                ((string= "grep" grepper)
                 (delq nil (list "--recursive"
                                 (and (natnump context-lines)
@@ -1163,11 +1254,12 @@ this tool cannot be used")))))
                                 (and glob (format "--include=%s" glob))
                                 "--max-count=1000"
                                 "--line-number" "--regexp" regex
-                                full-path)))))
-             (exit-code (apply #'call-process grepper nil '(t t) nil args)))
+                                (file-local-name full-path))))))
+             (exit-code (apply #'process-file grepper nil '(t t) nil args)))
         (when (/= exit-code 0)
           (goto-char (point-min))
           (insert (format "Error: search failed with exit-code %d.  Tool output:\n\n" exit-code)))
+        (gptel-agent--sanitize-buffer "Grep")
         (gptel-agent--truncate-buffer "grep")
         (buffer-string)))))
 
@@ -1393,10 +1485,10 @@ ARG-VALUES is a list: (type description prompt)"
                "\n" gptel-agent--hrule
                (propertize (concat (capitalize agent-type) " Task: ")
                            'face 'font-lock-escape-face)
-               (propertize description 'face 'font-lock-doc-face)
+               (propertize (or description "(no description)") 'face 'font-lock-doc-face)
                (propertize
                 " " 'display
-                (if (fboundp 'string-pixel-width)
+                (if (and (display-graphic-p) (fboundp 'string-pixel-width))
                     `(space :align-to (- right (,(string-pixel-width model))))
                   `(space :align-to (- right ,(+ 5 (string-width model))))))
                model "\n")))
@@ -1597,6 +1689,11 @@ If required, consider using the url as the input to the `Read` tool to get the c
  :description "Fetch and read the contents of a URL.
 
 - Returns the text of the URL (not HTML) formatted for reading.
+- For YouTube video URLs, returns the video description and transcript
+  (timestamped paragraphs) instead.  Use this tool proactively for
+  YouTube URLs.
+- If the URL serves binary content, returns an error with instructions
+  to inspect it via the Bash tool instead.
 - Request times out after 30 seconds."
  :args '(( :name "url"
            :type "string"
@@ -1604,20 +1701,6 @@ If required, consider using the url as the input to the `Read` tool to get the c
  :async t
  :include t
  :category "gptel-agent")
-
-(gptel-make-tool
- :name "YouTube"
- :function #'gptel-agent--yt-read-url
- :description "Find the description and video transcript for a youtube video.  Returns a markdown formatted string containing two sections:
-
-\"description\": The video description added by the uploader
-\"transcript\": The video transcript in SRT format"
- :args '((:name "url"
-                :description "The youtube video URL, for example \"https://www.youtube.com/watch?v=H2qJRnV8ZGA\""
-                :type "string"))
- :category "gptel-agent"
- :async t
- :include t)
 
 (gptel-make-tool
  :name "Diagnostics"
@@ -1741,10 +1824,12 @@ Consider using the more granular tools \"Insert\" or \"Edit\" first."
 - Supports glob patterns like \"*.md\" or \"*test*.py\".
   The glob applies to the basename of the file (with extension).
 - Does not support double wildcard \"**/*\".
+- Hidden files and directories are included, except `.git` directories,
+  which are always omitted.
 - Returns matching file paths at all depths sorted by modification time.
   Limit the depth of the search by providing the `depth` argument.
 - When you are doing an open ended search that may require multiple rounds
-  of globbing and grepping, use the \"task\" tool instead
+  of globbing and grepping, use the \"Agent\" tool instead
 - You can call multiple tools in a single response.  It is always better to
   speculatively perform multiple searches in parallel if they are potentially useful."
  :function #'gptel-agent--glob
@@ -1839,7 +1924,7 @@ Only one todo can be `in_progress` at a time."
         :status
         ( :type string
           :enum ["pending" "in_progress" "completed"]
-          :description "Task status: pending, in_progress (exactly one), or completed")
+          :description "Task status: pending, in_progress, or completed (exactly one)")
         :activeForm
         ( :type string :minLength 1
           :description "Present continuous form shown during execution (e.g., 'Running tests')")))))
