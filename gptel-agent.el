@@ -30,7 +30,8 @@
 ;; LLM, to autonomously perform tasks.
 ;;
 ;; It has access to
-;; - the web (via basic web search, URL fetching and YouTube video metadata),
+;; - the web (via basic web search and URL fetching, including YouTube video
+;;   descriptions and transcripts),
 ;; - local files (read/write/edit),
 ;; - the state of Emacs (documentation and Elisp evaluation),
 ;; - and Bash, if you are in a POSIX-y environment.
@@ -687,8 +688,6 @@ this session, which defaults to the default `gptel-agent'."
       (gptel--apply-preset              ;Apply the gptel-agent preset
        (or agent-preset 'gptel-agent)
        (lambda (sym val) (set (make-local-variable sym) val)))
-      (unless gptel-max-tokens              ;Agent tasks typically need
-        (setq-local gptel-max-tokens 8192)) ;a higher than usual value
       (when gptel-use-header-line
         (let* ((agent-mode t)
                (switch-mode
